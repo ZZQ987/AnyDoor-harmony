@@ -100,6 +100,9 @@ class DDIMSampler(object):
         size = (batch_size, C, H, W)
         print(f'Data shape for DDIM sampling is {size}, eta {eta}')
 
+        print('cfg scale是：')
+        print(unconditional_guidance_scale)
+
         samples, intermediates = self.ddim_sampling(conditioning, size,
                                                     callback=callback,
                                                     img_callback=img_callback,
@@ -151,10 +154,19 @@ class DDIMSampler(object):
             index = total_steps - i - 1
             ts = torch.full((b,), step, device=device, dtype=torch.long)
 
+            # dim1 = 4, combine fg and bg
+            # dim1 = 9, cat fg and bg
             if mask is not None:
                 assert x0 is not None
-                img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
-                img = img_orig * mask + (1. - mask) * img
+                if self.model.channels==9:
+                    # img = img * mask + (1. - mask) * img_orig
+                    img = torch.concatenate([img,mask,x0[:,4:,:,:]],dim=1)
+                elif self.model.channels == 8:
+                    img = torch.concatenate([img,x0],dim=1)
+                # else:
+                #     # img = img_orig * mask + (1. - mask) * img
+                #     img_orig = self.model.q_sample(x0[:, :4, :, :], ts)  # TODO: deterministic forward pass?
+                #     img = img*mask +(1.-mask)*img_orig
 
             if ucg_schedule is not None:
                 assert len(ucg_schedule) == len(time_range)
@@ -182,12 +194,16 @@ class DDIMSampler(object):
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       dynamic_threshold=None):
+        model_input = x
+        if self.model.channels == 9:
+            x,mask,masked_latent = torch.split(x,[4,1,4],dim=1)
+
         b, *_, device = *x.shape, x.device
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            model_output = self.model.apply_model(x, t, c)
+            model_output = self.model.apply_model(model_input, t, c)########
         else:
-            x_in = torch.cat([x] * 2)
+            x_in = torch.cat([model_input] * 2)##########
             t_in = torch.cat([t] * 2)
             if isinstance(c, dict):
                 assert isinstance(unconditional_conditioning, dict)
@@ -208,6 +224,7 @@ class DDIMSampler(object):
                     c_in.append(torch.cat([unconditional_conditioning[i], c[i]]))
             else:
                 c_in = torch.cat([unconditional_conditioning, c])
+            # CFG
             model_uncond, model_t = self.model.apply_model(x_in, t_in, c_in).chunk(2)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 

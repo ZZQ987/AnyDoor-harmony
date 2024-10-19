@@ -5,6 +5,7 @@ https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bb
 https://github.com/CompVis/taming-transformers
 -- merci
 """
+import copy
 
 import torch
 import torch.nn as nn
@@ -27,6 +28,8 @@ from ldm.models.autoencoder import IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
 
+# from diffusers.training_utils import compute_snr
+# from perceptualLoss import PerceptualLoss
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -90,6 +93,7 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
@@ -112,7 +116,8 @@ class DDPM(pl.LightningModule):
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
             if reset_ema:
                 assert self.use_ema
-                print(f"Resetting ema to pure model weights. This is useful when restoring from an ema-only checkpoint.")
+                print(
+                    f"Resetting ema to pure model weights. This is useful when restoring from an ema-only checkpoint.")
                 self.model_ema = LitEma(self.model)
         if reset_num_ema_updates:
             print(" +++++++++++ WARNING: RESETTING NUM_EMA UPDATES TO ZERO +++++++++++ ")
@@ -364,7 +369,7 @@ class DDPM(pl.LightningModule):
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x.shape) * x
         )
 
-    def get_loss(self, pred, target, mean=True):
+    def get_loss(self, pred, target, mean=True, timesteps=None, mask=None):
         if self.loss_type == 'l1':
             loss = (target - pred).abs()
             if mean:
@@ -374,6 +379,28 @@ class DDPM(pl.LightningModule):
                 loss = torch.nn.functional.mse_loss(target, pred)
             else:
                 loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+        # elif self.loss_type == 'my_loss':
+        #
+        #     # 用优化后的损失加速收敛
+        #     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+        #     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
+        #     # This is discussed in Section 4.2 of the same paper.
+        #     # "SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
+        #     snr_gamma = 5.0
+        #     snr = compute_snr(timesteps)
+        #     mse_loss_weights = (
+        #             torch.stack([snr, snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
+        #     )
+        #     # We first calculate the original loss. Then we mean over the non-batch dimensions and
+        #     # rebalance the sample-wise losses with their respective loss weights.
+        #     # Finally, we take the mean of the rebalanced loss.
+        #     # change the original function
+        #
+        #     # loss = F.mse_loss(pred.float(), target.float(), reduction="none")
+        #     loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+        #     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+        #     loss = loss.mean()
+
         else:
             raise NotImplementedError("unknown loss type '{loss_type}'")
 
@@ -662,10 +689,10 @@ class LatentDiffusion(DDPM):
         return self.scale_factor * z
 
     def get_learned_conditioning(self, c):
-        #c 1,3,224,224 
+        # c 1,3,224,224
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
-                #1,1,1024
+                # 1,1,1024
                 c = self.cond_stage_model.encode(c)
                 if isinstance(c, DiagonalGaussianDistribution):
                     c = c.mode()
@@ -768,12 +795,46 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, bs=None, return_x=False):
+        # get tar_image
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
-        x = x.to(self.device)
-        encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach()
+
+        if self.channels == 9:
+            x, masked_image, mask = torch.split(x, [3, 3, 1], dim=1)
+
+            x = x.to(self.device)
+            encoder_posterior = self.encode_first_stage(x)
+            z = self.get_first_stage_encoding(encoder_posterior).detach()
+
+            masked_image = masked_image.to(self.device)
+            encoder_posterior = self.encode_first_stage(masked_image)
+            z_masked_image = self.get_first_stage_encoding(encoder_posterior).detach()
+
+            mask = torch.nn.functional.interpolate(
+                mask, size=(64, 64)
+            )
+            mask = mask.to(self.device)
+
+            z = torch.cat([z, mask, z_masked_image], dim=1)
+        elif self.channels == 4:
+            x, _, mask = torch.split(x, [3, 3, 1], dim=1)
+
+            x = x.to(self.device)
+            encoder_posterior = self.encode_first_stage(x)
+            z = self.get_first_stage_encoding(encoder_posterior).detach()
+
+            # masked_image = masked_image.to(self.device)
+            # encoder_posterior = self.encode_first_stage(masked_image)
+            # z_masked_image = self.get_first_stage_encoding(encoder_posterior).detach()
+
+            mask = torch.nn.functional.interpolate(
+                mask, size=(64, 64)
+            )
+            mask = mask.to(self.device)
+
+            z = torch.cat([z, mask], dim=1)
+
 
         if self.model.conditioning_key is not None and not self.force_null_conditioning:
             if cond_key is None:
@@ -784,6 +845,7 @@ class LatentDiffusion(DDPM):
                 elif cond_key in ['class_label', 'cls']:
                     xc = batch
                 else:
+                    # get ref_image
                     xc = super().get_input(batch, cond_key).to(self.device)
             else:
                 xc = x
@@ -791,6 +853,7 @@ class LatentDiffusion(DDPM):
                 if isinstance(xc, dict) or isinstance(xc, list):
                     c = self.get_learned_conditioning(xc)
                 else:
+                    # DINO v2
                     c = self.get_learned_conditioning(xc.to(self.device))
             else:
                 c = xc
@@ -839,9 +902,9 @@ class LatentDiffusion(DDPM):
         return loss
 
     def forward(self, x, c, *args, **kwargs):
-        #t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
-        t = self.time_steps.reshape( (x.shape[0],) ).to(self.device).long()  
-        
+        # t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        t = self.time_steps.reshape((x.shape[0],)).to(self.device).long()
+
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
@@ -870,7 +933,7 @@ class LatentDiffusion(DDPM):
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
         return (extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart) / \
-               extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+            extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
 
     def _prior_bpd(self, x_start):
         """
@@ -886,10 +949,86 @@ class LatentDiffusion(DDPM):
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
         return mean_flat(kl_prior) / np.log(2.0)
 
-    def p_losses(self, x_start, cond, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        model_output = self.apply_model(x_noisy, t, cond)
+    # https://github.com/TiankaiHang/Min-SNR-Diffusion-Training/blob/521b624bd70c67cee4bdf49225915f5945a872e3/guided_diffusion/gaussian_diffusion.py#L847-L849
+    def compute_snr(self, t):
+        alpha = extract_into_tensor(self.sqrt_alphas_cumprod, t, t.shape)
+        sigma = extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, t.shape)
+        snr = (alpha / sigma) ** 2
+        return snr
+
+    def get_one_loss(self, pred, target, type='l2', mean=True, t=None, mask=None, ):
+        loss = None
+        if type == 'l1':
+            loss = (target - pred).abs()
+            if mean:
+                loss = loss.mean()
+        elif type == 'l2':
+            if mean:
+                loss = torch.nn.functional.mse_loss(target, pred)
+            else:
+                loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+        elif type == 'snr':
+
+            # 用优化后的损失加速收敛
+            # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+            # Since we predict the noise instead of x_0, the original formulation is slightly changed.
+            # This is discussed in Section 4.2 of the same paper.
+            # "SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
+            snr_gamma = 5.0
+            snr = self.compute_snr(t)
+            mse_loss_weights = (
+                    torch.stack([snr, snr_gamma * torch.ones_like(t)], dim=1).min(dim=1)[0] / snr
+            )
+            # We first calculate the original loss. Then we mean over the non-batch dimensions and
+            # rebalance the sample-wise losses with their respective loss weights.
+            # Finally, we take the mean of the rebalanced loss.
+            # change the original function
+
+            # loss = F.mse_loss(pred.float(), target.float(), reduction="none")
+            loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+            loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+            # loss = loss.mean()
+
+        # elif type == 'perceptual':
+        #
+        #     bg_pred_latent = pred * mask +(1.-mask)* torch.zeros_like(pred)
+        #     bg_target_latent = target * mask +(1.-mask) * torch.zeros_like(target)
+        #
+        #     bg_pred = self.decode_first_stage(bg_pred_latent)
+        #     bg_target = self.decode_first_stage(bg_target_latent)
+        #
+        #     perceptualLoss = PerceptualLoss()
+        #     # 自带了mean操作
+        #     loss = perceptualLoss(bg_pred,bg_target)
+
+        else:
+            raise NotImplementedError("unknown loss type '{loss_type}'")
+
+        return loss
+
+    def p_losses(self, x_start, cond, t, noise=None, perceptual=False, min_snr=False):
+
+        # 注意，这里的x_start源于上面的z
+        # 其实是 [latent,mask,masked_image_latent]
+        # 但是noisy只加在latent上面，所以这里要再split一遍
+        latent_masked_image = None
+        if self.channels == 9:
+            x_start, mask, latent_masked_image = torch.split(x_start, [4, 1, 4], dim=1)
+            noise = default(noise, lambda: torch.randn_like(x_start))
+            x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+            model_input = torch.concatenate([x_noisy, mask, latent_masked_image], dim=1)
+            model_output = self.apply_model(model_input, t, cond)
+        elif self.channels == 8 :
+            noise = default(noise, lambda: torch.randn_like(x_start))
+            x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+            model_input = torch.concatenate([x_noisy, x_start], dim=1)
+            model_output = self.apply_model(model_input, t, cond)
+        else:
+            x_start, mask = torch.split(x_start, [4, 1], dim=1)
+            noise = default(noise, lambda: torch.randn_like(x_start))
+            x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+            model_input = x_noisy
+            model_output = self.apply_model(model_input, t, cond)
 
         loss_dict = {}
         prefix = 'train' if self.training else 'val'
@@ -903,13 +1042,45 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
-        loss_simple = self.get_loss(model_output, target, mean=False) 
-        #boundary = self.boundary.to(loss_simple.device)
-        #boundary = F.interpolate(boundary, size = (64,64)) * 5 + 1.0 #16,1,64,64
+        # mse loss
+        loss_simple = self.get_one_loss(model_output, target, mean=False)
+        # 4,4,64,64
 
-        #print(loss_simple.shape) #16,4,64,64
-        loss_simple = loss_simple.mean([1, 2, 3])
-        #.mean([1, 2, 3])
+        if min_snr:
+            # snr_mse_loss
+            snr_gamma = 5.0
+            snr = self.compute_snr(t)
+            mse_loss_weights = (
+                    torch.stack([snr, snr_gamma * torch.ones_like(t)], dim=1).min(dim=1)[0] / snr
+            )
+            loss_simple = loss_simple.mean([1, 2, 3]) * mse_loss_weights
+        else:
+            # print(loss_simple.shape) #16,4,64,64
+            loss_simple = loss_simple.mean([1, 2, 3])
+
+        if perceptual:
+            x_start_pred = self.predict_start_from_noise(x_noisy, t, noise=model_output)
+            tt = torch.randint(0, self.num_timesteps, (x_start.shape[0],), device=self.device).long()
+            # noise = default(noise, lambda: torch.randn_like(x_start))
+            x_tt = self.q_sample(x_start=x_start, t=tt, noise=noise)
+            x_tt_pred = self.q_sample(x_start=x_start_pred, t=tt, noise=model_output)
+
+            # perceptual_model = model
+            # 因为 latent_unet 的 encoder 和 middle_block 都是 locked
+            model_input_real, model_input_pred = None, None
+            if self.channels == 9:
+                model_input_real = torch.concatenate([x_tt, mask, latent_masked_image], dim=1)
+                model_input_pred = torch.concatenate([x_tt_pred, mask, latent_masked_image], dim=1)
+            else:
+                model_input_real = x_tt
+                model_input_pred = x_tt_pred
+            feature_real = self.get_hidden_feature(model_input_real, tt, cond)[0]
+            feature_pred = self.get_hidden_feature(model_input_pred, tt, cond)[0]
+
+            perceptual_loss = self.get_one_loss(feature_real, feature_pred, mean=False).mean([1, 2, 3])
+            loss_simple += perceptual_loss
+
+        # .mean([1, 2, 3])
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
         logvar_t = self.logvar[t].to(self.device)
@@ -921,13 +1092,15 @@ class LatentDiffusion(DDPM):
 
         loss = self.l_simple_weight * loss.mean()
 
+        # loss_vlb has not been used
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+
         loss += (self.original_elbo_weight * loss_vlb)
         loss_dict.update({f'{prefix}/loss': loss})
 
-        #print(self.parameterization, self.learn_logvar, self.original_elbo_weight, self.lvlb_weights[t])
+        # print(self.parameterization, self.learn_logvar, self.original_elbo_weight, self.lvlb_weights[t])
 
         return loss, loss_dict
 
@@ -1474,7 +1647,7 @@ class LatentUpscaleDiffusion(LatentDiffusion):
                     uc[k] = [uc_tmp]
                 elif k == "c_adm":  # todo: only run with text-based guidance?
                     assert isinstance(c[k], torch.Tensor)
-                    #uc[k] = torch.ones_like(c[k]) * self.low_scale_model.max_noise_level
+                    # uc[k] = torch.ones_like(c[k]) * self.low_scale_model.max_noise_level
                     uc[k] = c[k]
                 elif isinstance(c[k], list):
                     uc[k] = [c[k][i] for i in range(len(c[k]))]
@@ -1741,7 +1914,7 @@ class LatentDepth2ImageDiffusion(LatentFinetuneDiffusion):
         log = super().log_images(*args, **kwargs)
         depth = self.depth_model(args[0][self.depth_stage_key])
         depth_min, depth_max = torch.amin(depth, dim=[1, 2, 3], keepdim=True), \
-                               torch.amax(depth, dim=[1, 2, 3], keepdim=True)
+            torch.amax(depth, dim=[1, 2, 3], keepdim=True)
         log["depth"] = 2. * (depth - depth_min) / (depth_max - depth_min) - 1.
         return log
 
@@ -1750,6 +1923,7 @@ class LatentUpscaleFinetuneDiffusion(LatentFinetuneDiffusion):
     """
         condition on low-res image (and optionally on some spatial noise augmentation)
     """
+
     def __init__(self, concat_keys=("lr",), reshuffle_patch_size=None,
                  low_scale_config=None, low_scale_key=None, *args, **kwargs):
         super().__init__(concat_keys=concat_keys, *args, **kwargs)
