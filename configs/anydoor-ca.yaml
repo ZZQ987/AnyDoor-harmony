@@ -1,5 +1,5 @@
 model:
-  target: cldm.cldm.ControlLDM
+  target: cldm.cldm-CA.ControlLDM
   params:
     linear_start: 0.00085
     linear_end: 0.0120
@@ -10,7 +10,7 @@ model:
     cond_stage_key: "ref"
     control_key: "hint"
     image_size: 64
-    channels: 9
+    channels: 4
     cond_stage_trainable: false
     conditioning_key: crossattn
     monitor: val/loss_simple_ema
@@ -19,7 +19,7 @@ model:
     only_mid_control: False
 
     control_stage_config:
-      target: cldm.cldm.ControlNet
+      target: cldm.cldm-CA.ControlNet_CA
       params:
         use_checkpoint: True
         image_size: 32 # unused
@@ -36,12 +36,15 @@ model:
         context_dim: 1024
         legacy: False
 
+        use_pixelwiseChAttn: True
+        ChAttn_region: mask_global
+
     unet_config:
-      target: cldm.cldm.ControlledUnetModel
+      target: cldm.cldm-CA.ControlledUnetModel
       params:
         use_checkpoint: True
         image_size: 32 # unused
-        in_channels: 9
+        in_channels: 4
         out_channels: 4
         model_channels: 320
         attention_resolutions: [ 4, 2, 1 ]
@@ -77,6 +80,9 @@ model:
           dropout: 0.0
         lossconfig:
           target: torch.nn.Identity
+#
+#    cond_stage_config:
+#      target: ldm.modules.encoders.modules.FrozenOpenCLIPImageEncoder
 
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenDinoV2Encoder

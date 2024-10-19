@@ -1,5 +1,5 @@
 model:
-  target: cldm.cldm.ControlLDM
+  target: cldm.cldm-S2AM.ControlLDM
   params:
     linear_start: 0.00085
     linear_end: 0.0120
@@ -19,12 +19,12 @@ model:
     only_mid_control: False
 
     control_stage_config:
-      target: cldm.cldm.ControlNet
+      target: cldm.cldm-S2AM.ControlNet_CA
       params:
         use_checkpoint: True
         image_size: 32 # unused
         in_channels: 4
-        hint_channels: 7 #3
+        hint_channels: 4 #3
         model_channels: 320
         attention_resolutions: [ 4, 2, 1 ]
         num_res_blocks: 2
@@ -36,8 +36,11 @@ model:
         context_dim: 1024
         legacy: False
 
+        use_pixelwiseChAttn: True
+        ChAttn_region: global
+
     unet_config:
-      target: cldm.cldm.ControlledUnetModel
+      target: cldm.cldm-S2AM.ControlledUnetModel
       params:
         use_checkpoint: True
         image_size: 32 # unused
@@ -77,6 +80,9 @@ model:
           dropout: 0.0
         lossconfig:
           target: torch.nn.Identity
+#
+#    cond_stage_config:
+#      target: ldm.modules.encoders.modules.FrozenOpenCLIPImageEncoder
 
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenDinoV2Encoder

@@ -56,6 +56,22 @@ Train:
     TE_root: path/Saliency/DUTS-TE/DUTS-TE-Image/
     HFlickr_root: path/HFlickr/masks/
 
+  MyDataset:
+    image_dir: /data1/student/zzq/Blending/data/10.5/source
+
+  HAdobe5k:
+    image_dir: /data1/student/zzq/Blending/data/HAdobe5k/composite_images
+    mode: train
+  HCOCO:
+    image_dir: /data1/student/zzq/Blending/data/HCOCO/composite_images
+    mode: train
+  Hday2night:
+    image_dir: /data1/student/zzq/Blending/data/Hday2night/composite_images
+    mode: train
+  HFlickr:
+    image_dir: /data1/student/zzq/Blending/data/HFlickr/composite_images
+    mode: train
+
 Test:
   DreamBooth:
     fg_dir: path/DreamBooth/AnyDoor_DreamBooth
@@ -63,6 +79,19 @@ Test:
 
   VitonHDTest:
     image_dir: path/TryOn/VitonHD/test/cloth
+
+  HAdobe5k:
+    image_dir: /data1/student/zzq/Blending/data/HAdobe5k/composite_images
+    mode: test
+  HCOCO:
+    image_dir: /data1/student/zzq/Blending/data/HCOCO/composite_images
+    mode: test
+  Hday2night:
+    image_dir: /data1/student/zzq/Blending/data/Hday2night/composite_images
+    mode: test
+  HFlickr:
+    image_dir: /data1/student/zzq/Blending/data/HFlickr/composite_images
+    mode: test
 
 
 
